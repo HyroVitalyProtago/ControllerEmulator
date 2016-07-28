@@ -11,16 +11,8 @@ using proto;
 using Gvr.Internal;
 using UnityEngine.EventSystems;
 using System.Collections.Generic;
+using System.Reflection;
 
-/// <summary>
-/// TODO
-/// - show the correct IP
-/// - send all events
-///   - send accelerometer event
-///   - send motion event
-///   - send gyroscope event
-///   - send key event
-/// </summary>
 class EmulatorServerSocket : MonoBehaviour {
 	#region class_attributes
 	static readonly int _port = 7003;
@@ -45,6 +37,8 @@ class EmulatorServerSocket : MonoBehaviour {
 	Vector2 _touchpadNormalizedPositionToScreen;
 	float _mapXStart, _mapXStop, _mapYStart, _mapYStop;
 	float _touchpadSize;
+	List<int> _touchesId = new List<int>();
+	int _clickTouchId = -1;
 
 	TcpListener _tcpServer;
 	Thread _phoneEventThread;
@@ -100,7 +94,7 @@ class EmulatorServerSocket : MonoBehaviour {
 		UpdateOrientation();
 		UpdateGyroscope();
 		UpdateAccelerometer();
-		// TODO UpdateMotion
+		UpdateMotion();
 	}
 
 	void OnDestroy() {
@@ -114,6 +108,7 @@ class EmulatorServerSocket : MonoBehaviour {
 	}
 	#endregion
 
+	// TODO don't know exactly what this function should return...
 	long GetTimestamp() { return (long) Time.realtimeSinceStartup; }
 
 	void UpdateOrientation() {
@@ -162,6 +157,39 @@ class EmulatorServerSocket : MonoBehaviour {
 		});
 	}
 
+	void UpdateMotion() {
+		List<TouchData> touches = Input.touches.Select(t => new TouchData(t)).ToList();
+
+		#if UNITY_EDITOR // Mouse Test
+		if (Input.GetMouseButton(0)) touches.Add(new TouchData(0, TouchPhase.Moved, Input.mousePosition));
+		#endif
+
+		if (touches.Count <= 0) return;
+
+		IEnumerable<TouchData> touchpadTouches = touches.Where(t => _touchesId.Contains(t.fingerId));
+		if (!touchpadTouches.Any()) return;
+
+		IEnumerable<TouchData> movedTouches = touchpadTouches.Where(t => t.phase == TouchPhase.Moved && t.fingerId != _clickTouchId);
+		if (movedTouches.Any()) {
+			OnMotion(movedTouches, EmulatorTouchEvent.Action.kActionMove);
+		}
+	}
+
+	// encapsulating Touch for debugging purpose....
+	struct TouchData {
+		public int fingerId { get; private set; }
+		public TouchPhase phase { get; private set; }
+		public Vector2 position { get; private set; }
+		public int tapCount { get; private set; }
+		public TouchData(int fingerId = 0, TouchPhase phase = TouchPhase.Began, Vector2 position = default(Vector2), int tapCount = 1) {
+			this.fingerId = fingerId;
+			this.phase = phase;
+			this.position = position;
+			this.tapCount = tapCount;
+		}
+		public TouchData(Touch touch) : this(touch.fingerId, touch.phase, touch.position, touch.tapCount) {}
+	}
+
 	void Enqueue(Entry e) {
 		lock (_pendingEvents.SyncRoot) {
 			_pendingEvents.Enqueue(e);
@@ -177,7 +205,6 @@ class EmulatorServerSocket : MonoBehaviour {
 
 			// Get the current ip and notify state change
 			var ips = (Dns.GetHostEntry(Dns.GetHostName())).AddressList.ToList();
-//			ips.ForEach(tmp => Debug.LogFormat("{0} {1}",tmp.AddressFamily, tmp.ToString()));
 			var ip = ips.Last(x => x.AddressFamily == AddressFamily.InterNetwork && x.ToString() != "0.0.0.0");
 			if (ip == null) {
 				throw new InvalidOperationException();
@@ -283,13 +310,28 @@ class EmulatorServerSocket : MonoBehaviour {
 	float MapF(float value, float start1, float stop1, float start2, float stop2) {
 		return start2 + (stop2 - start2) * ((value - start1) / (stop1 - start1));
 	}
+
 	Vector2 NormalizedPositionToScreen(Vector2 v) { return new Vector2(v.x / Screen.width, v.y / Screen.height); }
-	Vector2 NormalizedPositionToTouchpad(Vector2 v, bool alreadyNormalized = false) {
-		Vector2 nv = alreadyNormalized ? v : NormalizedPositionToScreen(v);
+
+	Vector2 NormalizedPositionToTouchpad(Vector2 v) {
+		// v is clamped to the touchpad
+		if (Vector2.Distance(_touchpadPosition, v) > _touchpadSize) {
+			v = _touchpadPosition + (v - _touchpadPosition).normalized * _touchpadSize;
+		}
+
+		// v is normalized according to the screen size
+		Vector2 nv = NormalizedPositionToScreen(v);
+
+		// v is normalized inside the touchpad
+		//   0
+		// 0 + 1
+		//   1
 		return new Vector2(MapF(nv.x,_mapXStart,_mapXStop,0,1), MapF(nv.y,_mapYStart,_mapYStop,1,0));
 	}
+
 	bool InsideTouchpad(Vector2 v) { return Vector2.Distance(_touchpadPosition, v) < _touchpadSize; }
-	IEnumerable<PhoneEvent.Types.MotionEvent.Types.Pointer> TouchesToPointers(IEnumerable<Touch> touches) {
+
+	IEnumerable<PhoneEvent.Types.MotionEvent.Types.Pointer> TouchesToPointers(IEnumerable<TouchData> touches) {
 		return touches.Select(t => {
 			Vector2 normalizedPositionToTouchpad = NormalizedPositionToTouchpad(t.position);
 			return PhoneEvent.Types.MotionEvent.Types.Pointer
@@ -302,45 +344,68 @@ class EmulatorServerSocket : MonoBehaviour {
 	}
 	#endregion
 
-	// TODO keep trace of fingers id to do better things
-	// TODO check touches into update for MOTION
-
 	public void OnMotionDown(BaseEventData bed) {
-//		Vector2 normalizedMousePositionToTouchpad = NormalizedPositionToTouchpad(Input.mousePosition);
-//		Debug.LogFormat("{0} < {1}", Vector2.Distance(_touchpadPosition, Input.mousePosition), _normalizedTouchpadWidth * Screen.width);
-//		Debug.LogFormat("normalizedMousePositionInTouchpad(x:{0}, y:{1})",normalizedMousePositionToTouchpad.x, normalizedMousePositionToTouchpad.y);
+		IEnumerable<TouchData> touchesData = Input.touches.Select(t => new TouchData(t));
 
-		var touches = Input.touches.Where(t => t.phase == TouchPhase.Began && InsideTouchpad(t.position) && t.tapCount >= 2);
-		if (touches.Any()) {
+		// Detect new touches on touchpad
+		List<TouchData> touches = touchesData.Where(t => t.phase == TouchPhase.Began && InsideTouchpad(t.position)).ToList();
+
+		#if UNITY_EDITOR // Mouse Test
+		if (InsideTouchpad(Input.mousePosition)) {
+			touches.Add(new TouchData(0, TouchPhase.Began, Input.mousePosition, Input.GetMouseButton(1) ? 2 : 1));
+		}
+		#endif
+
+		if (!touches.Any()) return; // there is nothing to do
+
+		// Is there a click?
+		IEnumerable<TouchData> clickTouches = touches.Where(t => t.tapCount >= 2);
+		if (clickTouches.Any()) {
 			OnButton(EmulatorTouchEvent.Action.kActionDown, EmulatorButtonEvent.ButtonCode.kClick);
-			OnButton(EmulatorTouchEvent.Action.kActionUp, EmulatorButtonEvent.ButtonCode.kClick); // TODO
+
+			var clickTouch = clickTouches.First();
+			_clickTouchId = clickTouch.fingerId;
+			touches.Remove(clickTouch); // not detected as a motion event
 		}
 
-		OnMotion(TouchPhase.Began, EmulatorTouchEvent.Action.kActionDown);
-	}
-	public void OnMotionUp(BaseEventData bed) {
-		OnMotion(TouchPhase.Ended, EmulatorTouchEvent.Action.kActionUp);
-	}
-	public void OnMotionMove(BaseEventData bed) {
-		OnMotion(TouchPhase.Moved, EmulatorTouchEvent.Action.kActionMove);
-	}
-	public void OnMotionCancel(BaseEventData bed) {
-		OnMotion(TouchPhase.Canceled, EmulatorTouchEvent.Action.kActionCancel);
-	}
-	void OnMotion(TouchPhase phase, EmulatorTouchEvent.Action action) {
-		// Test with mouse
-//		Vector2 normalizedPositionToTouchpad = NormalizedPositionToTouchpad(Input.mousePosition);
-//		PhoneEvent.Types.MotionEvent.Types.Pointer[] touches = { PhoneEvent.Types.MotionEvent.Types.Pointer
-//				.CreateBuilder()
-//				.SetId(0)
-//				.SetNormalizedX(normalizedPositionToTouchpad.x)
-//				.SetNormalizedY(normalizedPositionToTouchpad.y)
-//				.Build()
-//		};
+		if (!touches.Any()) return; // don't send empty event (if one touch was a click, it is now removed)
 
-		var touches = Input.touches.Where(t => t.phase == phase && InsideTouchpad(t.position));
-		if (!touches.Any()) return;
+		// Stock ids of touches
+		_touchesId = _touchesId.Union(touches.Select(t => t.fingerId)).ToList();
 
+		// Send corresponding event
+		OnMotion(touches, EmulatorTouchEvent.Action.kActionDown);
+	}
+
+	public void OnTouchUp(BaseEventData bed) {
+		List<TouchData> touches = Input.touches.Select(t => new TouchData(t)).ToList();
+
+		#if UNITY_EDITOR // Mouse Test
+		touches.Add(new TouchData(0, TouchPhase.Ended, Input.mousePosition));
+		#endif
+
+		// Click is released ?
+		if (_clickTouchId != -1) {
+			IEnumerable<TouchData> clickTouches = touches.Where(t => t.fingerId == _clickTouchId);
+			if (clickTouches.Any()) {
+				OnButton(EmulatorTouchEvent.Action.kActionUp, EmulatorButtonEvent.ButtonCode.kClick);
+				_clickTouchId = -1;
+			}
+		}
+
+		// Considering only touches who began on touchpad
+		IEnumerable<TouchData> touchpadTouches = touches.Where(t => _touchesId.Contains(t.fingerId));
+		if (!touchpadTouches.Any()) return;
+
+		// Send corresponding event
+		IEnumerable<TouchData> endedTouches = touchpadTouches.Where(t => t.phase == TouchPhase.Ended);
+		if (endedTouches.Any()) {
+			OnMotion(endedTouches, EmulatorTouchEvent.Action.kActionUp);
+			_touchesId.RemoveAll(tid => endedTouches.Any(t => t.fingerId == tid)); // remove released touches
+		}
+	}
+
+	void OnMotion(IEnumerable<TouchData> touches, EmulatorTouchEvent.Action action) {
 		var motion = PhoneEvent.Types.MotionEvent
 			.CreateBuilder()
 			.SetTimestamp(GetTimestamp())
