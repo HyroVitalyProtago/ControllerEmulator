@@ -13,28 +13,38 @@ public class UpdateInfos : MonoBehaviour {
 		_connectedColor = Color.green,
 		_errorColor = Color.red;
 
+	EmulatorServerSocket.State _lastState;
+	string _lastIp, _lastPort;
+
 	public void Update() {
-		switch (_ess.Current) {
-		case EmulatorServerSocket.State.Init:
-			_state.text = "Init";
-			_stateImage.color = _initColor;
-			break;
-		case EmulatorServerSocket.State.Waiting:
-			_state.text = "Waiting for connection";
-			_stateImage.color = _waitingColor;
-			break;
-		case EmulatorServerSocket.State.Connected:
-			_state.text = "Connected";
-			_stateImage.color = _connectedColor;
-			break;
-		case EmulatorServerSocket.State.Error:
-			_state.text = "Error";
-			_stateImage.color = _errorColor;
-			break;
-		default:
-			throw new InvalidOperationException();	
+		if (_lastState != _ess.Current) {
+			switch (_ess.Current) {
+			case EmulatorServerSocket.State.Init:
+				_state.text = "Init";
+				_stateImage.color = _initColor;
+				break;
+			case EmulatorServerSocket.State.Waiting:
+				_state.text = "Waiting for connection";
+				_stateImage.color = _waitingColor;
+				break;
+			case EmulatorServerSocket.State.Connected:
+				_state.text = "Connected";
+				_stateImage.color = _connectedColor;
+				break;
+			case EmulatorServerSocket.State.Error:
+				_state.text = "Error";
+				_stateImage.color = _errorColor;
+				break;
+			default:
+				throw new InvalidOperationException();	
+			}
+			_lastState = _ess.Current;
 		}
 
-		_ipPort.text = "IP: " + _ess.Ip + ", port: " + _ess.Port;
+		if (_lastIp != _ess.Ip || _lastPort != _ess.Port) {
+			_ipPort.text = "IP: " + _ess.Ip + ", port: " + _ess.Port;
+			_lastIp = _ess.Ip;
+			_lastPort = _ess.Port;
+		}
 	}
 }

@@ -11,11 +11,15 @@ using proto;
 using Gvr.Internal;
 using UnityEngine.EventSystems;
 using System.Collections.Generic;
+
+using Debug = UnityEngine.Debug;
+using Google.ProtocolBuffers;
 using System.Reflection;
 
 class EmulatorServerSocket : MonoBehaviour {
 	#region class_attributes
 	static readonly int _port = 7003;
+	static readonly string _portStr = _port.ToString();
 
 	// TODO properly
 	static readonly byte[][] _types = new byte[][]{
@@ -46,10 +50,16 @@ class EmulatorServerSocket : MonoBehaviour {
 	volatile bool shouldStop = false;
 
 	public string Ip { get; private set; }
-	public string Port { get { return _port.ToString(); } }
+	public string Port { get { return _portStr; } }
 	public State Current { get; private set; }
 
 	Queue _pendingEvents = Queue.Synchronized(new Queue());
+
+	Entry[] _entries = new Entry[10];
+	int _currentEntry;
+
+//	PhoneEvent.Types.OrientationEvent orientationEvent;
+//	FieldInfo orientationEventXFieldInfo;
 	#endregion
 
 	#region subtypes
@@ -57,7 +67,9 @@ class EmulatorServerSocket : MonoBehaviour {
 
 	struct Entry {
 		public int type;
+		public int size;
 		public byte[] bytes;
+		public Stream stream;
 	}
 	#endregion
 
@@ -70,11 +82,59 @@ class EmulatorServerSocket : MonoBehaviour {
 	int TypeOfEvent(PhoneEvent.Types.DepthMapEvent e) { return 4; }
 	int TypeOfEvent(PhoneEvent.Types.OrientationEvent e) { return 5; }
 	int TypeOfEvent(PhoneEvent.Types.KeyEvent e) { return 6; }
+
+	void OrientationEventEntryFill(ref Entry entry, long timestamp, float x, float y, float z, float w) {
+		entry.type = 5;
+
+		// Value on X bytes
+//		entry.stream.Position = 0;
+//		orientationEvent.WriteTo(entry.stream); // IMessageLite
+
+		CustomCodedOutputStream.Bytes = entry.bytes;
+		CustomCodedOutputStream.Position = 0;
+
+		CustomCodedOutputStream.WriteInt32(8);
+		CustomCodedOutputStream.WriteInt64(timestamp);
+
+		CustomCodedOutputStream.WriteInt32(21);
+		CustomCodedOutputStream.WriteFloat(x);
+
+		CustomCodedOutputStream.WriteInt32(29);
+		CustomCodedOutputStream.WriteFloat(y);
+
+		CustomCodedOutputStream.WriteInt32(37);
+		CustomCodedOutputStream.WriteFloat(z);
+
+		CustomCodedOutputStream.WriteInt32(45);
+		CustomCodedOutputStream.WriteFloat(w);
+
+		// Message length on 4 bytes (reversed int32)
+		entry.size = CustomCodedOutputStream.Position; // (int) entry.stream.Position;
+	}
 	#endregion
 
 	#region unity_callbacks
 	void Awake() {
 		Input.gyro.enabled = true;
+
+		// init all entries
+		for (int i = 0; i < _entries.Length; ++i) {
+			_entries[i] = new Entry();
+			_entries[i].bytes = new byte[64];
+			_entries[i].stream = new MemoryStream(_entries[i].bytes);
+		}
+
+//		orientationEvent = PhoneEvent.Types.OrientationEvent
+//			.CreateBuilder()
+//			.SetTimestamp(GetTimestamp())
+//			.SetX(Input.gyro.attitude.x)
+//			.SetY(Input.gyro.attitude.y)
+//			.SetZ(Input.gyro.attitude.z)
+//			.SetW(-Input.gyro.attitude.w)
+//			.Build();
+//
+//		orientationEventXFieldInfo = typeof(PhoneEvent.Types.OrientationEvent)
+//			.GetField("x_", BindingFlags.Instance | BindingFlags.NonPublic);
 	}
 
 	void Start() {
@@ -91,10 +151,17 @@ class EmulatorServerSocket : MonoBehaviour {
 	}
 
 	void Update() {
+		_currentEntry = 0;
+
 		UpdateOrientation();
-		UpdateGyroscope();
-		UpdateAccelerometer();
-		UpdateMotion();
+//		UpdateGyroscope();
+//		UpdateAccelerometer();
+//		UpdateMotion();
+
+		// small heap with fast and frequent garbage collection
+//		if (Time.frameCount % 30 == 0) {
+//			System.GC.Collect();
+//		}
 	}
 
 	void OnDestroy() {
@@ -108,23 +175,52 @@ class EmulatorServerSocket : MonoBehaviour {
 	}
 	#endregion
 
+	bool IsEntriesNotFull() { return _currentEntry < _entries.Length; }
+
 	// TODO don't know exactly what this function should return...
 	long GetTimestamp() { return (long) Time.realtimeSinceStartup; }
 
 	void UpdateOrientation() {
-		var orientationEvent = PhoneEvent.Types.OrientationEvent
-			.CreateBuilder()
-			.SetTimestamp(GetTimestamp())
-			.SetX(Input.gyro.attitude.x)
-			.SetY(Input.gyro.attitude.y)
-			.SetZ(Input.gyro.attitude.z)
-			.SetW(-Input.gyro.attitude.w)
-			.Build();
+//		PhoneEvent.Types.OrientationEvent orientationEvent = PhoneEvent.Types.OrientationEvent
+//			.CreateBuilder()
+//			.SetTimestamp(GetTimestamp())
+//			.SetX(Input.gyro.attitude.x)
+//			.SetY(Input.gyro.attitude.y)
+//			.SetZ(Input.gyro.attitude.z)
+//			.SetW(-Input.gyro.attitude.w)
+//			.Build();
+//
+//		Enqueue(new Entry {
+//			type = TypeOfEvent(orientationEvent),
+//			bytes = orientationEvent.ToByteArray()
+//		});
 
-		Enqueue(new Entry {
-			type = TypeOfEvent(orientationEvent),
-			bytes = orientationEvent.ToByteArray()
-		});
+		lock (_entries.SyncRoot) {
+			if (IsEntriesNotFull()) {
+				OrientationEventEntryFill(
+					ref _entries[_currentEntry++],
+					timestamp: GetTimestamp(),
+					x: Input.gyro.attitude.x,
+					y: Input.gyro.attitude.y,
+					z: Input.gyro.attitude.z,
+					w: -Input.gyro.attitude.w
+				);
+				Monitor.PulseAll(_entries.SyncRoot);
+			}
+		}
+
+		//			print(BitConverter.ToString(
+		//				PhoneEvent.Types.OrientationEvent
+		//				.CreateBuilder()
+		//				.SetTimestamp(GetTimestamp())
+		//				.SetX(Input.gyro.attitude.x)
+		//				.SetY(Input.gyro.attitude.y)
+		//				.SetZ(Input.gyro.attitude.z)
+		//				.SetW(-Input.gyro.attitude.w)
+		//				.Build()
+		//				.ToByteArray()
+		//			));
+		//			print(BitConverter.ToString(_entries[_currentEntry - 1].bytes));
 	}
 
 	void UpdateGyroscope() {
@@ -224,17 +320,32 @@ class EmulatorServerSocket : MonoBehaviour {
 				NetworkStream stream = client.GetStream();
 				stream.WriteTimeout = 10; // 5000; // ms
 				try {
-					lock (_pendingEvents.SyncRoot) {
+//					lock (_pendingEvents.SyncRoot) {
+//						while (!shouldStop) {
+//						
+//							if (_pendingEvents.Count <= 0) {
+//								Monitor.Wait(_pendingEvents.SyncRoot, 50);
+//								continue;
+//							}
+//
+//							while (_pendingEvents.Count > 0) {
+//								var entry = (Entry) _pendingEvents.Dequeue();
+//								Send(stream, entry.type, entry.bytes);
+//							}
+//						}
+//					}
+
+					lock (_entries.SyncRoot) {
 						while (!shouldStop) {
-						
-							if (_pendingEvents.Count <= 0) {
-								Monitor.Wait(_pendingEvents.SyncRoot, 50);
+
+							if (_currentEntry <= 0) {
+								Monitor.Wait(_entries.SyncRoot, 50);
 								continue;
 							}
 
-							while (_pendingEvents.Count > 0) {
-								var entry = (Entry) _pendingEvents.Dequeue();
-								Send(stream, entry.type, entry.bytes);
+							while (_currentEntry > 0) {
+								Entry entry = (Entry) _entries[--_currentEntry];
+								Send(stream, ref entry);
 							}
 						}
 					}
@@ -272,6 +383,19 @@ class EmulatorServerSocket : MonoBehaviour {
 		stream.Write(buffer, 0, buffer.Length);
 	}
 
+	void Send(Stream stream, ref Entry entry) {
+		SendReversedFixedInt32(stream, entry.size); // send size
+		stream.Write(_types[entry.type], 0, 4); // send type
+		stream.Write(entry.bytes, 0, entry.size); // send value
+	}
+
+	void SendReversedFixedInt32(Stream stream, int value) {
+		stream.WriteByte((byte)(value >> 24));
+		stream.WriteByte((byte)(value >> 16));
+		stream.WriteByte((byte)(value >> 8));
+		stream.WriteByte((byte)(value));
+	}
+
 	void StopServer() {
 		if (_tcpServer != null) {
 			_tcpServer.Stop();
@@ -295,15 +419,15 @@ class EmulatorServerSocket : MonoBehaviour {
 	void OnApp(EmulatorTouchEvent.Action action) { OnButton(action, EmulatorButtonEvent.ButtonCode.kApp); }
 
 	void OnButton(EmulatorTouchEvent.Action action, EmulatorButtonEvent.ButtonCode buttonCode) {
-		var btn = PhoneEvent.Types.KeyEvent
-			.CreateBuilder()
-			.SetAction((int) action)
-			.SetCode((int) buttonCode)
-			.Build();
-		Enqueue(new Entry {
-			type = TypeOfEvent(btn),
-			bytes = btn.ToByteArray()
-		});
+//		var btn = PhoneEvent.Types.KeyEvent
+//			.CreateBuilder()
+//			.SetAction((int) action)
+//			.SetCode((int) buttonCode)
+//			.Build();
+//		Enqueue(new Entry {
+//			type = TypeOfEvent(btn),
+//			bytes = btn.ToByteArray()
+//		});
 	}
 
 	#region touch_utils
@@ -345,6 +469,8 @@ class EmulatorServerSocket : MonoBehaviour {
 	#endregion
 
 	public void OnMotionDown(BaseEventData bed) {
+		if (true) return; // TEST
+
 		IEnumerable<TouchData> touchesData = Input.touches.Select(t => new TouchData(t));
 
 		// Detect new touches on touchpad
@@ -378,6 +504,8 @@ class EmulatorServerSocket : MonoBehaviour {
 	}
 
 	public void OnTouchUp(BaseEventData bed) {
+		if (true) return; // TEST
+
 		List<TouchData> touches = Input.touches.Select(t => new TouchData(t)).ToList();
 
 		#if UNITY_EDITOR // Mouse Test
@@ -406,17 +534,17 @@ class EmulatorServerSocket : MonoBehaviour {
 	}
 
 	void OnMotion(IEnumerable<TouchData> touches, EmulatorTouchEvent.Action action) {
-		var motion = PhoneEvent.Types.MotionEvent
-			.CreateBuilder()
-			.SetTimestamp(GetTimestamp())
-			.SetAction((int) action)
-			.AddRangePointers(TouchesToPointers(touches))
-			.Build();
-
-		Enqueue(new Entry {
-			type = TypeOfEvent(motion),
-			bytes = motion.ToByteArray()
-		});
+//		var motion = PhoneEvent.Types.MotionEvent
+//			.CreateBuilder()
+//			.SetTimestamp(GetTimestamp())
+//			.SetAction((int) action)
+//			.AddRangePointers(TouchesToPointers(touches))
+//			.Build();
+//
+//		Enqueue(new Entry {
+//			type = TypeOfEvent(motion),
+//			bytes = motion.ToByteArray()
+//		});
 	}
 	#endregion
 }
