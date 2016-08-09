@@ -4,19 +4,25 @@
 public class StaticStream {
 
     static StaticStream _instance = new StaticStream();
+    public static StaticStream Begin(byte[] buffer) {
+        return _instance.Init(buffer);
+    }
 
     byte[] buffer;
     int position;
 
-    public static StaticStream Begin(byte[] buffer) {
-        return _instance.Init(buffer);
-    }
+    public int Position { get { return position; } }
     
     private StaticStream() {}
 
     StaticStream Init(byte[] buffer) {
         this.buffer = buffer;
         this.position = 0;
+        return this;
+    }
+
+    public StaticStream SetPosition(int position) {
+        this.position = position;
         return this;
     }
 

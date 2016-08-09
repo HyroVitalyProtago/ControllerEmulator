@@ -10,18 +10,11 @@ using System.IO;
 using proto;
 using Gvr.Internal;
 using UnityEngine.EventSystems;
-using System.Collections.Generic;
-
-using Debug = UnityEngine.Debug;
-using Google.ProtocolBuffers;
-using System.Reflection;
 
 class EmulatorServerSocket : MonoBehaviour {
     #region class_attributes
     static readonly int _port = 7003;
     static readonly string _portStr = _port.ToString();
-
-    // TODO properly
     static readonly byte[][] _types = new byte[][]{
         new byte[]{ 0x00, 0x00, 0x00, 0x00 }, // NOTHING
 		new byte[]{ 0x08, 0x01, 0x12, 0x15 }, // MOTION
@@ -31,7 +24,6 @@ class EmulatorServerSocket : MonoBehaviour {
 		new byte[]{ 0x08, 0x05, 0x32, 0x1E }, // ORIENTATION
 		new byte[]{ 0x08, 0x06, 0x3A, 0x04 } // KEY
 	};
-
     static readonly float _normalizedTouchpadWidth = .3f, _normalizedTouchpadHeight = .2f;
     #endregion
 
@@ -42,7 +34,7 @@ class EmulatorServerSocket : MonoBehaviour {
     Vector2 _touchpadNormalizedPositionToScreen;
     float _mapXStart, _mapXStop, _mapYStart, _mapYStop;
     float _touchpadSize;
-    List<int> _touchesId = new List<int>();
+    int _touchId;
     int _clickTouchId = -1;
 
     TcpListener _tcpServer;
@@ -53,8 +45,6 @@ class EmulatorServerSocket : MonoBehaviour {
     public string Ip { get; private set; }
     public string Port { get { return _portStr; } }
     public State Current { get; private set; }
-
-    Queue _pendingEvents = Queue.Synchronized(new Queue());
 
     readonly Entry[] _entries = new Entry[10];
     int _currentEntry;
@@ -67,34 +57,6 @@ class EmulatorServerSocket : MonoBehaviour {
         public int type;
         public int size;
         public byte[] bytes;
-    }
-    #endregion
-
-    #region event_utils
-    // TODO for each event type
-    // refer to the enum PhoneEvent.Types.Type id
-    int TypeOfEvent(PhoneEvent.Types.MotionEvent e) { return 1; }
-    int TypeOfEvent(PhoneEvent.Types.GyroscopeEvent e) { return 2; }
-    int TypeOfEvent(PhoneEvent.Types.AccelerometerEvent e) { return 3; }
-    int TypeOfEvent(PhoneEvent.Types.DepthMapEvent e) { return 4; }
-    int TypeOfEvent(PhoneEvent.Types.OrientationEvent e) { return 5; }
-    int TypeOfEvent(PhoneEvent.Types.KeyEvent e) { return 6; }
-
-    int TypeOfEvent(Type t) {
-        if (t == typeof(PhoneEvent.Types.MotionEvent)) {
-            return 1;
-        } else if (t == typeof(PhoneEvent.Types.GyroscopeEvent)) {
-            return 2;
-        } else if (t == typeof(PhoneEvent.Types.AccelerometerEvent)) {
-            return 3;
-        } else if (t == typeof(PhoneEvent.Types.DepthMapEvent)) {
-            return 4;
-        } else if (t == typeof(PhoneEvent.Types.OrientationEvent)) {
-            return 5;
-        } else if (t == typeof(PhoneEvent.Types.KeyEvent)) {
-            return 6;
-        }
-        throw new InvalidOperationException();
     }
     #endregion
 
@@ -129,7 +91,7 @@ class EmulatorServerSocket : MonoBehaviour {
         UpdateOrientation();
         UpdateGyroscope();
         UpdateAccelerometer();
-        //UpdateMotion();
+        UpdateMotion();
 
         // small heap with fast and frequent garbage collection
         // if (Time.frameCount % 30 == 0) { System.GC.Collect(); }
@@ -145,6 +107,23 @@ class EmulatorServerSocket : MonoBehaviour {
         }
     }
     #endregion
+
+    int TypeOfEvent(Type t) {
+        if (t == typeof(PhoneEvent.Types.MotionEvent)) {
+            return 1;
+        } else if (t == typeof(PhoneEvent.Types.GyroscopeEvent)) {
+            return 2;
+        } else if (t == typeof(PhoneEvent.Types.AccelerometerEvent)) {
+            return 3;
+        } else if (t == typeof(PhoneEvent.Types.DepthMapEvent)) {
+            return 4;
+        } else if (t == typeof(PhoneEvent.Types.OrientationEvent)) {
+            return 5;
+        } else if (t == typeof(PhoneEvent.Types.KeyEvent)) {
+            return 6;
+        }
+        throw new InvalidOperationException();
+    }
 
     bool IsEntriesNotFull() { return _currentEntry < _entries.Length; }
 
@@ -175,7 +154,6 @@ class EmulatorServerSocket : MonoBehaviour {
             }
         }
     }
-
     void UpdateGyroscope() {
         lock (_entries.SyncRoot) {
             if (IsEntriesNotFull()) {
@@ -198,7 +176,6 @@ class EmulatorServerSocket : MonoBehaviour {
             }
         }
     }
-
     void UpdateAccelerometer() {
         lock (_entries.SyncRoot) {
             if (IsEntriesNotFull()) {
@@ -221,44 +198,14 @@ class EmulatorServerSocket : MonoBehaviour {
             }
         }
     }
-
     void UpdateMotion() {
-        List<TouchData> touches = Input.touches.Select(t => new TouchData(t)).ToList();
+        Touch[] touches = Input.touches;
 
-#if UNITY_EDITOR // Mouse Test
-        if (Input.GetMouseButton(0)) touches.Add(new TouchData(0, TouchPhase.Moved, Input.mousePosition));
-#endif
+        if (touches.Length <= 0) return;
 
-        if (touches.Count <= 0) return;
-
-        IEnumerable<TouchData> touchpadTouches = touches.Where(t => _touchesId.Contains(t.fingerId));
-        if (!touchpadTouches.Any()) return;
-
-        IEnumerable<TouchData> movedTouches = touchpadTouches.Where(t => t.phase == TouchPhase.Moved && t.fingerId != _clickTouchId);
-        if (movedTouches.Any()) {
-            OnMotion(movedTouches, EmulatorTouchEvent.Action.kActionMove);
-        }
-    }
-
-    // encapsulating Touch for debugging purpose....
-    struct TouchData {
-        public int fingerId { get; private set; }
-        public TouchPhase phase { get; private set; }
-        public Vector2 position { get; private set; }
-        public int tapCount { get; private set; }
-        public TouchData(int fingerId = 0, TouchPhase phase = TouchPhase.Began, Vector2 position = default(Vector2), int tapCount = 1) {
-            this.fingerId = fingerId;
-            this.phase = phase;
-            this.position = position;
-            this.tapCount = tapCount;
-        }
-        public TouchData(Touch touch) : this(touch.fingerId, touch.phase, touch.position, touch.tapCount) { }
-    }
-
-    void Enqueue(Entry e) {
-        lock (_pendingEvents.SyncRoot) {
-            _pendingEvents.Enqueue(e);
-            Monitor.PulseAll(_pendingEvents.SyncRoot);
+        if (touches[0].fingerId == _touchId && touches[0].phase == TouchPhase.Moved &&
+            touches[0].fingerId != _clickTouchId) {
+            OnMotion(touches[0], EmulatorTouchEvent.Action.kActionMove);
         }
     }
 
@@ -341,7 +288,6 @@ class EmulatorServerSocket : MonoBehaviour {
         stream.Write(_types[entry.type], 0, 4); // send type
         stream.Write(entry.bytes, 0, entry.size); // send value
     }
-
     void SendReversedFixedInt32(Stream stream, int value) {
         stream.WriteByte((byte)(value >> 24));
         stream.WriteByte((byte)(value >> 16));
@@ -395,7 +341,9 @@ class EmulatorServerSocket : MonoBehaviour {
         return start2 + (stop2 - start2) * ((value - start1) / (stop1 - start1));
     }
 
-    Vector2 NormalizedPositionToScreen(Vector2 v) { return new Vector2(v.x / Screen.width, v.y / Screen.height); }
+    Vector2 NormalizedPositionToScreen(Vector2 v) {
+        return new Vector2(v.x / Screen.width, v.y / Screen.height);
+    }
 
     Vector2 NormalizedPositionToTouchpad(Vector2 v) {
         // v is clamped to the touchpad
@@ -413,98 +361,86 @@ class EmulatorServerSocket : MonoBehaviour {
         return new Vector2(MapF(nv.x, _mapXStart, _mapXStop, 0, 1), MapF(nv.y, _mapYStart, _mapYStop, 1, 0));
     }
 
-    bool InsideTouchpad(Vector2 v) { return Vector2.Distance(_touchpadPosition, v) < _touchpadSize; }
-
-    IEnumerable<PhoneEvent.Types.MotionEvent.Types.Pointer> TouchesToPointers(IEnumerable<TouchData> touches) {
-        return touches.Select(t => {
-            Vector2 normalizedPositionToTouchpad = NormalizedPositionToTouchpad(t.position);
-            return PhoneEvent.Types.MotionEvent.Types.Pointer
-                .CreateBuilder()
-                .SetId(t.fingerId)
-                .SetNormalizedX(normalizedPositionToTouchpad.x)
-                .SetNormalizedY(normalizedPositionToTouchpad.y)
-                .Build();
-        });
+    bool InsideTouchpad(Vector2 v) {
+        return Vector2.Distance(_touchpadPosition, v) < _touchpadSize;
     }
     #endregion
 
     public void OnMotionDown(BaseEventData bed) {
-        if (true) return; // TEST
+        Touch[] touches = Input.touches;
 
-        IEnumerable<TouchData> touchesData = Input.touches.Select(t => new TouchData(t));
+        if (touches.Length <= 0) return;
 
-        // Detect new touches on touchpad
-        List<TouchData> touches = touchesData.Where(t => t.phase == TouchPhase.Began && InsideTouchpad(t.position)).ToList();
+        if (touches[0].phase == TouchPhase.Began && InsideTouchpad(touches[0].position)) {
 
-#if UNITY_EDITOR // Mouse Test
-        if (InsideTouchpad(Input.mousePosition)) {
-            touches.Add(new TouchData(0, TouchPhase.Began, Input.mousePosition, Input.GetMouseButton(1) ? 2 : 1));
+            if (touches[0].tapCount >= 2) {
+                OnButton(EmulatorTouchEvent.Action.kActionDown, EmulatorButtonEvent.ButtonCode.kClick);
+                _clickTouchId = touches[0].fingerId;
+                return;
+            }
+
+            _touchId = touches[0].fingerId;
+
+            OnMotion(touches[0], EmulatorTouchEvent.Action.kActionDown);
         }
-#endif
-
-        if (!touches.Any()) return; // there is nothing to do
-
-        // Is there a click?
-        IEnumerable<TouchData> clickTouches = touches.Where(t => t.tapCount >= 2);
-        if (clickTouches.Any()) {
-            OnButton(EmulatorTouchEvent.Action.kActionDown, EmulatorButtonEvent.ButtonCode.kClick);
-
-            var clickTouch = clickTouches.First();
-            _clickTouchId = clickTouch.fingerId;
-            touches.Remove(clickTouch); // not detected as a motion event
-        }
-
-        if (!touches.Any()) return; // don't send empty event (if one touch was a click, it is now removed)
-
-        // Stock ids of touches
-        _touchesId = _touchesId.Union(touches.Select(t => t.fingerId)).ToList();
-
-        // Send corresponding event
-        OnMotion(touches, EmulatorTouchEvent.Action.kActionDown);
     }
 
     public void OnTouchUp(BaseEventData bed) {
-        if (true) return; // TEST
+        Touch[] touches = Input.touches;
 
-        List<TouchData> touches = Input.touches.Select(t => new TouchData(t)).ToList();
+        if (touches.Length <= 0) return;
 
-#if UNITY_EDITOR // Mouse Test
-        touches.Add(new TouchData(0, TouchPhase.Ended, Input.mousePosition));
-#endif
-
-        // Click is released ?
         if (_clickTouchId != -1) {
-            IEnumerable<TouchData> clickTouches = touches.Where(t => t.fingerId == _clickTouchId);
-            if (clickTouches.Any()) {
+            if (touches[0].fingerId == _clickTouchId) {
                 OnButton(EmulatorTouchEvent.Action.kActionUp, EmulatorButtonEvent.ButtonCode.kClick);
                 _clickTouchId = -1;
             }
         }
 
-        // Considering only touches who began on touchpad
-        IEnumerable<TouchData> touchpadTouches = touches.Where(t => _touchesId.Contains(t.fingerId));
-        if (!touchpadTouches.Any()) return;
-
-        // Send corresponding event
-        IEnumerable<TouchData> endedTouches = touchpadTouches.Where(t => t.phase == TouchPhase.Ended);
-        if (endedTouches.Any()) {
-            OnMotion(endedTouches, EmulatorTouchEvent.Action.kActionUp);
-            _touchesId.RemoveAll(tid => endedTouches.Any(t => t.fingerId == tid)); // remove released touches
+        if (touches[0].fingerId == _touchId && touches[0].phase == TouchPhase.Ended) {
+            OnMotion(touches[0], EmulatorTouchEvent.Action.kActionUp);
+            _touchId = -1;
         }
+
     }
 
-    void OnMotion(IEnumerable<TouchData> touches, EmulatorTouchEvent.Action action) {
-        //		var motion = PhoneEvent.Types.MotionEvent
-        //			.CreateBuilder()
-        //			.SetTimestamp(GetTimestamp())
-        //			.SetAction((int) action)
-        //			.AddRangePointers(TouchesToPointers(touches))
-        //			.Build();
-        //
-        //		Enqueue(new Entry {
-        //			type = TypeOfEvent(motion),
-        //			bytes = motion.ToByteArray()
-        //		});
+    void OnMotion(Touch touch, EmulatorTouchEvent.Action action) {
+        lock (_entries.SyncRoot) {
+            if (IsEntriesNotFull()) {
+                Vector2 normalizedPositionToTouchpad = NormalizedPositionToTouchpad(touch.position);
+
+                _entries[_currentEntry].type = TypeOfEvent(typeof(PhoneEvent.Types.MotionEvent));
+
+                StaticStream staticStream = StaticStream
+                    .Begin(_entries[_currentEntry].bytes)
+                    .WriteInt32(8)
+                    .WriteInt64(GetTimestamp())
+                    .WriteInt32(16)
+                    .WriteInt32((int)action)
+                    .WriteInt32(26);
+
+                int sizeOfPointerPosition = staticStream.Position;
+
+                _entries[_currentEntry].size = staticStream
+                    .WriteInt32(0) // size of pointer list not known
+                    .WriteInt32(8)
+                    .WriteInt32(touch.fingerId)
+                    .WriteInt32(21)
+                    .WriteFloat(normalizedPositionToTouchpad.x)
+                    .WriteInt32(29)
+                    .WriteFloat(normalizedPositionToTouchpad.y)
+                    .End();
+
+                // write the right size of pointer list
+                staticStream
+                    .SetPosition(sizeOfPointerPosition)
+                    .WriteInt32(_entries[_currentEntry].size - sizeOfPointerPosition - 1 /* for the WriteFixed32 */);
+
+                ++_currentEntry;
+
+                Monitor.PulseAll(_entries.SyncRoot);
+            }
+        }
     }
     #endregion
 }
