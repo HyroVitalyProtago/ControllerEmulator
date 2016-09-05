@@ -4,7 +4,9 @@
 
 This application is a lite copy of the one given by @GoogleVR who only works on #Android.
 
-/!\ There is now another branch called "optimized" : less memory allocation => less garbage collection calls ; all unused assets removed => compilation time particularly reduced /!\
+:exclamation: There is now another branch called "optimized" :
+- less memory allocation => less garbage collection calls ;
+- all unused assets removed => compilation time particularly reduced
 
 Because I haven't 2 Android phones, but a Nexus 4 and an iPhone 4 (who can't be the hmd because it's not powerful enough), this project let me use my old iOS as a remote controller for #Daydream apps like the Labs Controller Playground (given on github @GoogleVR for Unity).
 
